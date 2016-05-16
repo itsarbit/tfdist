@@ -91,7 +91,7 @@ def main(_):
 
         # Create a "supervisor", which oversees the training process.
         sv = tf.train.Supervisor(is_chief=(FLAGS.task_index == 0),
-                logdir=log_dir,
+                logdir=FLAGS.log_dir,
                 init_op=init_op,
                 summary_op=summary_op,
                 saver=saver,
