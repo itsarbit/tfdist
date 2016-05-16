@@ -19,8 +19,10 @@ flags.DEFINE_integer("train_steps", 1000,
 flags.DEFINE_float('learning_rate', 0.01, 'Initial learning rate.')
 flags.DEFINE_integer('batch_size', 100, 'Batch size.  '
         'Must divide evenly into the dataset sizes.')
-flags.DEFINE_string('train_dir', '/tmp/data',
+flags.DEFINE_string('train_dir', '/tmp/tfdata',
         'Directory to put the training data.')
+flags.DEFINE_string('log_dir', '/tmp/tflogs',
+        'Directory to put the logs.')
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -89,7 +91,7 @@ def main(_):
 
         # Create a "supervisor", which oversees the training process.
         sv = tf.train.Supervisor(is_chief=(FLAGS.task_index == 0),
-                logdir="/tmp/logs",
+                logdir=log_dir,
                 init_op=init_op,
                 summary_op=summary_op,
                 saver=saver,
