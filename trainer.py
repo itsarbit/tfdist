@@ -1,6 +1,6 @@
 import tensorflow as tf
-
 from tensorflow.examples.tutorials.mnist import input_data
+
 import math
 import time
 
@@ -24,6 +24,15 @@ flags.DEFINE_string('train_dir', '/tmp/tfdata',
 flags.DEFINE_string('log_dir', '/tmp/tflogs',
         'Directory to put the logs.')
 
+flags.DEFINE_integer("replicas_to_aggregate", None,
+                     "Number of replicas to aggregate before paramter update"
+                     "is applied (For sync_replicas mode only; default: "
+                     "num_workers)")
+flags.DEFINE_boolean("sync_replicas", False,
+                     "Use the sync_replicas (synchronized replicas) mode, "
+                     "wherein the parameter updates from workersare aggregated "
+                     "before applied to avoid stale gradients")
+
 FLAGS = tf.app.flags.FLAGS
 
 IMAGE_PIXELS = 28
@@ -37,19 +46,27 @@ def main(_):
     # Create a cluster from the parameter server and worker hosts.
     cluster = tf.train.ClusterSpec({"ps": ps_hosts, "worker": worker_hosts})
 
+    print "Starting servers..."
     # Create and start a server for the local task.
     server = tf.train.Server(cluster,
             job_name=FLAGS.job_name,
             task_index=FLAGS.task_index)
 
+    if FLAGS.sync_replicas:
+        if FLAGS.replicas_to_aggregate is None:
+            replicas_to_aggregate = len(worker_hosts)
+        else:
+            replicas_to_aggregate = FLAGS.replicas_to_aggregate
+
     if FLAGS.job_name == "ps":
         server.join()
-
     elif FLAGS.job_name == "worker":
         # Assigns ops to the local worker by default.
         with tf.device(tf.train.replica_device_setter(
             worker_device="/job:worker/task:%d" % FLAGS.task_index,
             cluster=cluster)):
+
+            is_chief=(FLAGS.task_index == 0)
 
             mnist = input_data.read_data_sets(FLAGS.train_dir, one_hot=True)
             # If True also add the variable to the graph collection
@@ -68,7 +85,6 @@ def main(_):
                 name="sm_w")
             sm_b = tf.Variable(tf.zeros([10]), name="sm_b")
 
-            # Ops: located on the worker specified with FLAGS.worker_index
             x = tf.placeholder(tf.float32, [None, IMAGE_PIXELS * IMAGE_PIXELS])
             y_ = tf.placeholder(tf.float32, [None, 10])
 
@@ -80,8 +96,22 @@ def main(_):
                                            tf.log(tf.clip_by_value(y, 1e-10, 1.0)))
 
             opt = tf.train.AdamOptimizer(FLAGS.learning_rate)
+
+            if FLAGS.sync_replicas:
+                opt = tf.train.SyncReplicasOptimizer(
+                        opt,
+                        replicas_to_aggregate=replicas_to_aggregate,
+                        total_num_replicas=len(worker_hosts),
+                        replica_id=FLAGS.task_index,
+                        name="mnist_sync_replicas")
+
             train_step = opt.minimize(cross_entropy,
                     global_step=global_step)
+
+            if FLAGS.sync_replicas and is_chief:
+                # Initial token and chief queue runners required by the sync_replicas mode
+                chief_queue_runner = opt.get_chief_queue_runner()
+                init_tokens_op = opt.get_init_tokens_op()
 
             init_op = tf.initialize_all_variables()
 
@@ -90,27 +120,34 @@ def main(_):
             init_op = tf.initialize_all_variables()
 
         # Create a "supervisor", which oversees the training process.
-        sv = tf.train.Supervisor(is_chief=(FLAGS.task_index == 0),
+        sv = tf.train.Supervisor(is_chief=is_chief,
                 logdir=FLAGS.log_dir,
                 init_op=init_op,
                 summary_op=summary_op,
                 saver=saver,
                 global_step=global_step,
-                save_model_secs=600)
+                recovery_wait_secs=1)
 
         sess_config = tf.ConfigProto(
                 allow_soft_placement=True,
                 log_device_placement=True,
                 device_filters=["/job:ps", "/job:worker/task:%d" % FLAGS.task_index])
 
+        print("Worker %d: Session start initializing..." % FLAGS.task_index)
+
         # The supervisor takes care of session initialization and restoring from
         # a checkpoint.
         sess = sv.prepare_or_wait_for_session(server.target, config=sess_config)
 
+        if FLAGS.sync_replicas and is_chief:
+            # Chief worker will start the chief queue runner and call the init op
+            print("Starting chief queue runner and running init_tokens_op")
+            sv.start_queue_runners(sess, [chief_queue_runner])
+            sess.run(init_tokens_op)
+
         print("Worker %d: Session initialization complete." % FLAGS.task_index)
 
         # Start queue runners for the input pipelines (if any).
-        sv.start_queue_runners(sess)
         # Perform training
         time_begin = time.time()
         print("Training begins @ %f" % time_begin)
